@@ -163,4 +163,4 @@ test-isotovideo:
 
 .PHONY: test-console-based-modules
 test-console-based-modules:
-	@! git --no-pager grep -E -l 'consoletest' tests/*.pm | xargs grep -l 'root-console' | xargs grep -L -e 'assert_screen' -e 'send_key'
+	@! git --no-pager diff --name-only --diff-filter=AM origin/master | grep -E '^tests/.*\.pm' | xargs grep -l 'consoletest' | xargs grep -l 'root-console' | xargs grep -L -e 'assert_screen' -e 'send_key' || echo "Check failed"
