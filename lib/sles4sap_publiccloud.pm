@@ -267,13 +267,20 @@ sub is_hana_online {
 }
 
 =head2 is_hana_resource_running
-    is_hana_resource_running([timeout => 60]);
+    is_hana_resource_running([quiet => 0]);
 
     Checks if resource msl_SAPHana_* is running on given node.
+
+=over 1
+
+=item B<quiet> - if set, returns the value without recording info (default: 0)
+
+=back  
 =cut
 
 sub is_hana_resource_running {
-    my ($self) = @_;
+    my ($self, %args) = @_;
+    $args{quiet} //= 0;
     my $hostname = $self->{my_instance}->{instance_id};
     my $hana_resource = join("_",
         "msl",
@@ -282,9 +289,13 @@ sub is_hana_resource_running {
         get_required_var("INSTANCE_SID") . get_required_var("INSTANCE_ID"));
 
     my $resource_output = $self->run_cmd(cmd => "crm resource status " . $hana_resource, quiet => 1);
-    my $node_status = grep /is running on: $hostname/, $resource_output;
-    record_info("Node status", "$hostname: $node_status");
-    return $node_status;
+    if ($resource_output =~ /is running on: \Q$hostname\E/) {
+        record_info("Node status", "$hana_resource is running on $hostname") unless $args{quiet};
+        return 1;
+    } else {
+        record_info("Node status", "$hana_resource is NOT running on $hostname") unless $args{quiet};
+        return 0;
+    }
 }
 
 =head2 stop_hana
@@ -335,8 +346,8 @@ sub stop_hana {
         my $out = $self->{my_instance}->wait_for_ssh(timeout => 60, wait_stop => 1);
         record_info("Wait ssh disappear end", "out:" . ($out // 'undefined'));
         sleep 10;
-        $self->{my_instance}->wait_for_ssh(timeout => 900);
-        return;
+        $out = $self->{my_instance}->wait_for_ssh(timeout => 900);
+        record_info("Wait ssh is back again", "out:" . ($out // 'undefined'));
     }
     else {
         my $sapadmin = lc(get_required_var('INSTANCE_SID')) . 'adm';
@@ -841,7 +852,6 @@ sub create_playbook_section_list {
           sap-hana-system-replication-hooks.yaml
         );
         push @playbook_list, $hana_cluster_playbook;
-        push @playbook_list, 'post-sap-hana-cluster.yaml';
     }
     return (\@playbook_list);
 }
@@ -937,10 +947,13 @@ sub create_hana_vars_section {
 sub display_full_status {
     my ($self) = @_;
     my $vm_name = $self->{my_instance}{instance_id};
-    my $crm_status = join("\n", "\n### CRM STATUS ###", $self->run_cmd(cmd => 'crm status', proceed_on_failure => 1));
-    my $saphanasr_showattr = join("\n", "\n### HANA REPLICATION INFO ###", $self->run_cmd(cmd => 'SAPHanaSR-showAttr', proceed_on_failure => 1));
+    my $final_message = join("\n", "### CRM STATUS ###",
+        $self->run_cmd(cmd => 'crm status', proceed_on_failure => 1),
+        "### CRM MON ###",
+        $self->run_cmd(cmd => $crm_mon_cmd, proceed_on_failure => 1),
+        "### HANA REPLICATION INFO ###",
+        $self->run_cmd(cmd => 'SAPHanaSR-showAttr', proceed_on_failure => 1));
 
-    my $final_message = join("\n", $crm_status, $saphanasr_showattr);
     record_info("STATUS $vm_name", $final_message);
 }
 
@@ -1131,10 +1144,9 @@ sub wait_for_cluster {
     $args{max_retries} //= 7;
 
     while ($args{max_retries} > 0) {
-        my $hanasr_output = $self->run_cmd(cmd => 'SAPHanaSR-showAttr --format=script', quiet => 1);
         my $crm_output = $self->run_cmd(cmd => $crm_mon_cmd, quiet => 1);
 
-        my $hanasr_ready = check_hana_topology(input => calculate_hana_topology(input => $hanasr_output));
+        my $hanasr_ready = check_hana_topology(input => $self->get_hana_topology());
         my $crm_ok = check_crm_output(input => $crm_output);
 
         if ($hanasr_ready && $crm_ok) {
@@ -1145,8 +1157,7 @@ sub wait_for_cluster {
         $args{max_retries}--;
         if ($args{max_retries} <= 0) {
             record_info('NOT OK', "Cluster or DB data synchronization issue detected after retrying.");
-            record_info('HANASR STATUS', $hanasr_output);
-            record_info('CRM STATUS', $crm_output);
+            $self->display_full_status();
             die "Cluster is not ready after specified retries.";
         }
         sleep($args{wait_time});

@@ -11,7 +11,7 @@ terraform:
     az_region: '%REGION%'
     deployment_name: '%DEPLOYMENTNAME%'
     os_image_uri: '%OS_URI%'
-    public_key: '%SSH_KEY_PUB%'
+    public_key: '%SLES4SAP_PUBSSHKEY%'
     hana_remote_python: '%ANSIBLE_REMOTE_PYTHON%'
     iscsi_remote_python: '%ANSIBLE_REMOTE_PYTHON%'
 ansible:
@@ -43,6 +43,5 @@ ansible:
     - sap-hana-system-replication.yaml
     - sap-hana-system-replication-hooks.yaml
     - sap-hana-cluster.yaml
-    - post-sap-hana-cluster.yaml
   destroy:
     - deregister.yaml

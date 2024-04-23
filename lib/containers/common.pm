@@ -11,7 +11,7 @@ use testapi;
 use registration;
 use version_utils;
 use utils qw(zypper_call systemctl file_content_replace script_retry script_output_retry);
-use containers::utils qw(can_build_sle_base registry_url container_ip container_route);
+use containers::utils qw(registry_url container_ip container_route);
 use transactional qw(trup_call check_reboot_changes process_reboot);
 use bootloader_setup 'add_grub_cmdline_settings';
 use serial_terminal 'select_serial_terminal';
@@ -19,9 +19,9 @@ use power_action_utils 'power_action';
 use Mojo::JSON;
 
 our @EXPORT = qw(is_unreleased_sle install_podman_when_needed install_docker_when_needed install_containerd_when_needed
-  test_container_runtime test_container_image scc_apply_docker_image_credentials scc_restore_docker_image_credentials
-  install_buildah_when_needed test_rpm_db_backend activate_containers_module check_containers_connectivity
-  test_search_registry switch_cgroup_version install_packages);
+  test_container_runtime test_container_image
+  install_buildah_when_needed activate_containers_module check_containers_connectivity
+  switch_cgroup_version install_packages);
 
 sub is_unreleased_sle {
     # If "SCC_URL" is set, it means we are in not-released SLE host and it points to proxy SCC url
@@ -152,89 +152,6 @@ sub install_containerd_when_needed {
     record_info('containerd', script_output('containerd -h'));
 }
 
-sub test_container_runtime {
-    my $runc = shift;
-    die "You must define the runtime!" unless $runc;
-
-    # Installation of runtime
-    record_info 'Test #1', 'Test: Installation';
-    if (script_run("which $runc") != 0) {
-        if (is_transactional) {
-            select_console 'root-console';
-            trup_call("pkg install $runc");
-            check_reboot_changes;
-        } else {
-            zypper_call("in $runc");
-        }
-    } else {
-        record_info('INFO', "$runc is already installed on the system.");
-    }
-    record_info("$runc", script_output("$runc -v"));
-
-    # create the OCI specification and verify that the template has been created
-    record_info 'Test #2', 'Test: OCI Specification';
-    assert_script_run("$runc spec");
-    assert_script_run('ls -l config.json');
-    script_run('cp config.json config.json.backup');
-
-    # Modify the configuration to run the container in background
-    assert_script_run("sed -i -e '/\"terminal\":/ s/: .*/: false,/' config.json");
-    assert_script_run("sed -i -e 's/\"sh\"/\"echo\", \"Kalimera\"/' config.json");
-
-    # Run (create, start, and delete) the container after it exits
-    record_info 'Test #3', 'Test: Use the run command';
-    assert_script_run("$runc run test1 | grep Kalimera");
-
-    # Restore the default configuration
-    assert_script_run('mv config.json.backup config.json');
-
-    assert_script_run("sed -i -e '/\"terminal\":/ s/: .*/: false,/' config.json");
-    assert_script_run("sed -i -e 's/\"sh\"/\"sleep\", \"120\"/' config.json");
-
-    # Container Lifecycle
-    record_info 'Test #4', 'Test: Create a container';
-    assert_script_run("$runc create test2");
-    assert_script_run("$runc state test2 | grep status | grep created");
-    record_info 'Test #5', 'Test: List containers';
-    assert_script_run("$runc list | grep test2");
-    record_info 'Test #6', 'Test: Start a container';
-    assert_script_run("$runc start test2");
-    assert_script_run("$runc state test2 | grep running");
-    record_info 'Test #7', 'Test: Pause a container';
-    assert_script_run("$runc pause test2");
-    assert_script_run("$runc state test2 | grep paused");
-    record_info 'Test #8', 'Test: Resume a container';
-    assert_script_run("$runc resume test2");
-    assert_script_run("$runc state test2 | grep running");
-    record_info 'Test #9', 'Test: Stop a container';
-    assert_script_run("$runc kill test2 KILL");
-    sleep 30;
-    assert_script_run("$runc state test2 | grep stopped");
-    record_info 'Test #10', 'Test: Delete a container';
-    assert_script_run("$runc delete test2");
-    assert_script_run("! $runc state test2");
-
-    # remove the configuration file
-    assert_script_run("rm config.json");
-}
-
-sub test_search_registry {
-    my $engine = shift;
-    my @registries = qw(docker.io);
-    push @registries, qw(registry.opensuse.org registry.suse.com) if ($engine eq 'podman');
-
-    foreach my $rlink (@registries) {
-        record_info("URL", "Scanning: $rlink");
-        my $start = time;
-        assert_script_run(sprintf('%s --log-level=debug search %s/busybox --format="{{.Name}}"', $engine, $rlink), timeout => 200);
-        my $duration = time - $start;
-        record_info('Response', "Registry $rlink responded in $duration seconds");
-        if ($duration > 60) {
-            record_info('Softfail', 'Searching registry.suse.com is too slow (sdsc#SD-106252 https://sd.suse.com/servicedesk/customer/portal/1/SD-106252)');
-        }
-    }
-}
-
 # Test a given image. Takes the image and container runtime (docker or podman) as arguments
 sub test_container_image {
     my %args = @_;
@@ -268,31 +185,6 @@ sub test_container_image {
         die "Heartbeat test failed for $image";
     }
     assert_script_run "rm -f $logfile";
-}
-
-sub scc_apply_docker_image_credentials {
-    my $regcode = get_var 'SCC_DOCKER_IMAGE';
-    assert_script_run "cp /etc/zypp/credentials.d/SCCcredentials{,.bak}";
-    assert_script_run "echo -ne \"$regcode\" > /etc/zypp/credentials.d/SCCcredentials";
-}
-
-sub scc_restore_docker_image_credentials {
-    assert_script_run "cp /etc/zypp/credentials.d/SCCcredentials{.bak,}" if (is_sle() && get_var('SCC_DOCKER_IMAGE'));
-}
-
-sub test_rpm_db_backend {
-    my %args = @_;
-    my $image = $args{image};
-    my $runtime = $args{runtime};
-
-    die 'Argument $image not provided!' unless $image;
-    die 'Argument $runtime not provided!' unless $runtime;
-
-    my ($running_version, $sp, $host_distri) = get_os_release("$runtime run $image");
-    # TW and SLE 15-SP3+ uses rpm-ndb in the image
-    if ($host_distri eq 'opensuse-tumbleweed' || ($host_distri eq 'sles' && check_version('>=15-SP3', "$running_version-SP$sp", qr/\d{2}(?:-sp\d)?/))) {
-        validate_script_output "$runtime run $image rpm --eval %_db_backend", sub { m/ndb/ };
-    }
 }
 
 sub check_containers_connectivity {
