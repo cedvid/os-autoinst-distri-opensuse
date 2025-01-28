@@ -21,7 +21,8 @@ use Test::Assert 'assert_equals';
 
 sub get_snapshot_id {
     my $snapshot_id = is_sle("<=12-SP5") ? '$3' : '$1';
-    return script_output("snapper ls | awk 'END {print $snapshot_id}'");
+    record_info("DEBUG", script_output("snapper ls"));
+    return script_output("snapper ls | awk 'NR>1 {print $snapshot_id}' | tail -n1");
 }
 
 sub run_zypper_cmd {
